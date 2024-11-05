@@ -11,6 +11,7 @@ import glob
 from datetime import datetime
 from typing import Dict, List, Optional
 
+
 def get_preset_files() -> Dict[str, str]:
     """Get all .json preset files from ./presets directory."""
     preset_files = {}
@@ -21,6 +22,7 @@ def get_preset_files() -> Dict[str, str]:
             preset_files[name] = preset_file
     return preset_files
 
+
 def load_preset(preset_file: str) -> List[Dict]:
     """Load preset configuration from JSON file."""
     try:
@@ -29,31 +31,33 @@ def load_preset(preset_file: str) -> List[Dict]:
     except (json.JSONDecodeError, FileNotFoundError) as e:
         raise ValueError(f"Error loading preset file: {e}")
 
+
 def create_ffmpeg_commands_from_preset(input_file: str, output_file: str, preset_config: List[Dict]) -> List[List[str]]:
     """Create multiple FFmpeg commands based on preset configuration."""
     commands = []
     base_name, ext = os.path.splitext(output_file)
-    
+
     for config in preset_config:
         resolution = config['s'].split('x')[1] + 'p'
         output = f"{base_name}_{resolution}{ext}"
-        
+
         cmd = ["ffmpeg", "-i", input_file]
-        
+
         # Add video parameters
         for key in ['c:v', 'crf', 'b:v', 's']:
             if key in config:
                 cmd.extend([f"-{key}", str(config[key])])
-                
+
         # Add audio parameters
         for key in ['c:a', 'b:a']:
             if key in config:
                 cmd.extend([f"-{key}", str(config[key])])
-                
+
         cmd.append(output)
         commands.append(cmd)
-    
+
     return commands
+
 
 class FFmpegProcess:
     def __init__(self, command: List[str], input_file: str, output_file: str):
@@ -69,55 +73,72 @@ class FFmpegProcess:
         self.memory_percent = 0.0
         self.memory_mb = 0.0
         self._psutil_process = None
-        self._output_thread = None
-
-    def start(self):
-        self.process = subprocess.Popen(
-            self.command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
-        self.status = "Running"
-        self._psutil_process = psutil.Process(self.process.pid)
-        # Initialize CPU monitoring
-        self._psutil_process.cpu_percent()
-
-    def kill(self):
-        """Safely terminate the FFmpeg process"""
-        try:
-            if self._psutil_process and self._psutil_process.is_running():
-                # Try graceful termination first
-                self._psutil_process.terminate()
-                try:
-                    self._psutil_process.wait(timeout=3)
-                except psutil.TimeoutExpired:
-                    # Force kill if process doesn't terminate
-                    self._psutil_process.kill()
-            
-            if self.process:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-            
-            self.status = "Killed"
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
 
     def update_resource_usage(self):
+        """Update process resource usage statistics."""
         try:
-            if self._psutil_process and self._psutil_process.is_running():
+            if self.process and self.process.poll() is None:
+                if not self._psutil_process or not self._psutil_process.is_running():
+                    self._psutil_process = psutil.Process(self.process.pid)
                 self.cpu_percent = self._psutil_process.cpu_percent()
                 mem_info = self._psutil_process.memory_info()
                 self.memory_mb = mem_info.rss / 1024 / 1024
                 self.memory_percent = self._psutil_process.memory_percent()
+            else:
+                self.cpu_percent = 0.0
+                self.memory_percent = 0.0
+                self.memory_mb = 0.0
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             self.cpu_percent = 0.0
             self.memory_percent = 0.0
             self.memory_mb = 0.0
+
+    def start(self):
+        """Start the FFmpeg process."""
+        try:
+            self.process = subprocess.Popen(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1
+            )
+            self.status = "Running"
+            if self.process.pid:
+                try:
+                    self._psutil_process = psutil.Process(self.process.pid)
+                    # Initialize CPU monitoring
+                    self._psutil_process.cpu_percent()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except subprocess.SubprocessError as e:
+            self.status = "Error"
+            self.has_error = True
+            self.output_lines.append(f"Failed to start process: {str(e)}")
+
+    def kill(self):
+        """Safely terminate the FFmpeg process."""
+        try:
+            if self.process:
+                if self.process.poll() is None:  # Only if still running
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                    self.status = "Killed"
+        except Exception:
+            pass  # Ensure kill operation doesn't crash
+
+        try:
+            if self._psutil_process and self._psutil_process.is_running():
+                self._psutil_process.terminate()
+                try:
+                    self._psutil_process.wait(timeout=3)
+                except psutil.TimeoutExpired:
+                    self._psutil_process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
     def to_dict(self):
         return {
@@ -135,8 +156,10 @@ class FFmpegProcess:
         process = cls(data['command'], data['input_file'], data['output_file'])
         process.status = data['status']
         process.has_error = data['has_error']
-        process.output_lines = data.get('output_lines', [])  # Restore output lines
+        process.output_lines = data.get(
+            'output_lines', [])  # Restore output lines
         return process
+
 
 class FFmpegManager:
     def __init__(self):
@@ -149,7 +172,7 @@ class FFmpegManager:
         self.command_string = ""
         self.save_file = "ffmpeg_processes.json"
         self.preset_files = get_preset_files()
-        
+
         # Start resource monitoring thread
         self.resource_monitor_thread = threading.Thread(
             target=self.monitor_resources,
@@ -161,18 +184,20 @@ class FFmpegManager:
         """Create and add multiple FFmpeg processes based on a preset."""
         if preset_name not in self.preset_files:
             return
-        
+
         try:
             preset_config = load_preset(self.preset_files[preset_name])
-            commands = create_ffmpeg_commands_from_preset(input_file, output_file, preset_config)
-            
+            commands = create_ffmpeg_commands_from_preset(
+                input_file, output_file, preset_config)
+
             for cmd in commands:
-                process = FFmpegProcess(cmd, input_file, cmd[-1])  # cmd[-1] is the output file
+                # cmd[-1] is the output file
+                process = FFmpegProcess(cmd, input_file, cmd[-1])
                 process.start()
-                
+
                 if process.process and process.process.pid:
                     self.processes[process.process.pid] = process
-                    
+
                     # Start output monitoring thread
                     thread = threading.Thread(
                         target=self.monitor_process_output,
@@ -180,10 +205,10 @@ class FFmpegManager:
                         daemon=True
                     )
                     thread.start()
-            
+
             # Save updated process list
             self.save_processes()
-            
+
         except ValueError as e:
             # Handle preset loading errors
             pass
@@ -191,28 +216,46 @@ class FFmpegManager:
     def draw_preset_list(self):
         """Draw the list of available presets."""
         height, width = self.screen.getmaxyx()
-        
+
         # Clear the bottom of the screen
         for i in range(height - len(self.preset_files) - 1, height):
             self.screen.addstr(i, 0, " " * (width - 1))
-        
+
         # Draw preset list
-        self.screen.addstr(height - len(self.preset_files) - 1, 0, "Available presets:")
+        self.screen.addstr(height - len(self.preset_files) -
+                           1, 0, "Available presets:")
         for i, preset_name in enumerate(sorted(self.preset_files.keys())):
-            self.screen.addstr(height - len(self.preset_files) + i, 2, f"{i + 1}: {preset_name}")
+            self.screen.addstr(height - len(self.preset_files) +
+                               i, 2, f"{i + 1}: {preset_name}")
 
     def monitor_resources(self):
+        """Monitor resource usage of running processes."""
         while True:
             pids = list(self.processes.keys())
             for pid in pids:
                 if pid in self.processes:
                     process = self.processes[pid]
-                    if not self.is_ffmpeg_process_running(pid):
-                        if process.status != "Killed":  # Don't update status if manually killed
-                            process.status = "Completed"
-                        self.save_processes()
+                    # Only update resources if process is still running
+                    if process.process and process.process.poll() is None:
+                        try:
+                            process.update_resource_usage()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            process.cpu_percent = 0.0
+                            process.memory_percent = 0.0
+                            process.memory_mb = 0.0
                     else:
-                        process.update_resource_usage()
+                        # Update status if process has finished
+                        if process.process:
+                            return_code = process.process.poll()
+                            if return_code == 0 and process.status != "Killed":
+                                process.status = "Completed"
+                            elif return_code != 0 and process.status != "Killed":
+                                process.status = "Error"
+                            process.cpu_percent = 0.0
+                            process.memory_percent = 0.0
+                            process.memory_mb = 0.0
+                            self.save_processes()
+
             time.sleep(1)
 
     def save_processes(self):
@@ -236,7 +279,8 @@ class FFmpegManager:
                     if self.is_ffmpeg_process_running(pid):
                         process = FFmpegProcess.from_dict(process_data)
                         process.process = subprocess.Popen(
-                            process_data['command'],  # Use original command instead of dummy
+                            # Use original command instead of dummy
+                            process_data['command'],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
                             universal_newlines=True,
@@ -255,9 +299,14 @@ class FFmpegManager:
             pass
 
     def is_ffmpeg_process_running(self, pid: int) -> bool:
+        """Check if an FFmpeg process is running."""
         try:
             process = psutil.Process(pid)
-            return 'ffmpeg' in process.name().lower() and process.is_running()
+            # Check if it's an FFmpeg process
+            is_ffmpeg = 'ffmpeg' in process.name().lower()
+            # Check if it's running
+            is_running = process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            return is_ffmpeg and is_running
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
 
@@ -279,10 +328,10 @@ class FFmpegManager:
         command = self.create_ffmpeg_command(input_file, output_file, codec)
         process = FFmpegProcess(command, input_file, output_file)
         process.start()
-        
+
         if process.process and process.process.pid:
             self.processes[process.process.pid] = process
-            
+
             # Start output monitoring thread
             thread = threading.Thread(
                 target=self.monitor_process_output,
@@ -290,42 +339,61 @@ class FFmpegManager:
                 daemon=True
             )
             thread.start()
-            
+
             # Save updated process list
             self.save_processes()
 
     def monitor_process_output(self, ffmpeg_process: FFmpegProcess):
+        """Monitor FFmpeg process output and status."""
         while True:
-            if not self.is_ffmpeg_process_running(ffmpeg_process.process.pid):
+            if ffmpeg_process.process:
+                # Check if process has finished
+                return_code = ffmpeg_process.process.poll()
+                if return_code is not None:
+                    if return_code == 0:
+                        ffmpeg_process.status = "Completed"
+                    else:
+                        ffmpeg_process.status = "Error"
+                    self.save_processes()
+                    break
+
+                try:
+                    line = ffmpeg_process.process.stdout.readline()
+                    if not line:
+                        continue
+
+                    line = line.strip()
+                    if line:
+                        ffmpeg_process.output_lines.append(line)
+                        if "error" in line.lower():
+                            ffmpeg_process.has_error = True
+                            ffmpeg_process.status = "Error"
+                            self.save_processes()
+
+                        self.output_queue.put((ffmpeg_process.process.pid, line))
+                except (IOError, AttributeError):
+                    break
+            else:
                 break
 
-            try:
-                line = ffmpeg_process.process.stdout.readline()
-                if not line:
-                    break
-                
-                line = line.strip()
-                if line:
-                    ffmpeg_process.output_lines.append(line)
-                    if "error" in line.lower():
-                        ffmpeg_process.has_error = True
-                        ffmpeg_process.status = "Error"
-                        self.save_processes()
-                    
-                    self.output_queue.put((ffmpeg_process.process.pid, line))
-            except (IOError, AttributeError):
-                break
+        # One final check after the loop exits
+        if ffmpeg_process.process and ffmpeg_process.process.poll() is not None:
+            if ffmpeg_process.process.poll() == 0:
+                ffmpeg_process.status = "Completed"
+            else:
+                ffmpeg_process.status = "Error"
+            self.save_processes()
 
     def draw_box(self, y, x, height, width, title=""):
         self.screen.addch(y, x, '┌')
         self.screen.addch(y, x + width - 1, '┐')
         self.screen.addch(y + height - 1, x, '└')
         self.screen.addch(y + height - 1, x + width - 1, '┘')
-        
+
         for i in range(1, width - 1):
             self.screen.addch(y, x + i, '─')
             self.screen.addch(y + height - 1, x + i, '─')
-        
+
         for i in range(1, height - 1):
             self.screen.addch(y + i, x, '│')
             self.screen.addch(y + i, x + width - 1, '│')
@@ -356,12 +424,13 @@ class FFmpegManager:
             status_line = f"{'> ' if pid == self.selected_pid else '  '}"
             status_line += f"PID: {pid} | Status: {process.status} | {resource_info} | "
             status_line += f"Input: {process.input_file} | Output: {process.output_file}"
-            
+
             if len(status_line) > width - 3:
                 status_line = status_line[:width-6] + "..."
-            
+
             if process.has_error:
-                self.screen.addstr(i + 3, 2, status_line, curses.A_BOLD | curses.A_REVERSE)
+                self.screen.addstr(i + 3, 2, status_line,
+                                   curses.A_BOLD | curses.A_REVERSE)
             else:
                 self.screen.addstr(i + 3, 2, status_line)
 
@@ -370,21 +439,24 @@ class FFmpegManager:
             output_start = process_box_height + 1
             output_height = height - output_start - 1
             if output_height > 3:
-                self.draw_box(output_start, 0, output_height, width, f"Output for PID {self.selected_pid}")
-                
+                self.draw_box(output_start, 0, output_height, width,
+                              f"Output for PID {self.selected_pid}")
+
                 process = self.processes[self.selected_pid]
                 available_lines = output_height - 2
                 start_idx = max(0, len(process.output_lines) - available_lines)
-                
+
                 for i, line in enumerate(process.output_lines[start_idx:]):
                     if i < available_lines:
                         truncated_line = line[:width-4]
-                        self.screen.addstr(output_start + 1 + i, 2, truncated_line)
+                        self.screen.addstr(
+                            output_start + 1 + i, 2, truncated_line)
 
         if self.command_mode:
             if self.preset_mode:
                 prompt = "New FFmpeg process from preset (format: input_file,output_file,preset_number): "
-                self.screen.addstr(height - len(self.preset_files) - 2, 0, prompt + self.command_string)
+                self.screen.addstr(
+                    height - len(self.preset_files) - 2, 0, prompt + self.command_string)
                 self.draw_preset_list()
             else:
                 prompt = "New FFmpeg process (format: input_file,output_file,codec): "
@@ -405,18 +477,21 @@ class FFmpegManager:
                 if self.command_string:
                     try:
                         if self.preset_mode:
-                            input_file, output_file, preset_num = self.command_string.split(',')
+                            input_file, output_file, preset_num = self.command_string.split(
+                                ',')
                             preset_num = int(preset_num.strip()) - 1
                             preset_names = sorted(self.preset_files.keys())
                             if 0 <= preset_num < len(preset_names):
                                 self.add_processes_from_preset(
-                                    input_file.strip(), 
-                                    output_file.strip(), 
+                                    input_file.strip(),
+                                    output_file.strip(),
                                     preset_names[preset_num]
                                 )
                         else:
-                            input_file, output_file, codec = self.command_string.split(',')
-                            self.add_process(input_file.strip(), output_file.strip(), codec.strip())
+                            input_file, output_file, codec = self.command_string.split(
+                                ',')
+                            self.add_process(
+                                input_file.strip(), output_file.strip(), codec.strip())
                     except (ValueError, IndexError):
                         pass
                 self.command_mode = False
@@ -446,7 +521,8 @@ class FFmpegManager:
                         self.selected_pid = pids[-1]
                     else:
                         idx = pids.index(self.selected_pid)
-                        self.selected_pid = pids[idx - 1] if idx > 0 else pids[-1]
+                        self.selected_pid = pids[idx -
+                                                 1] if idx > 0 else pids[-1]
             elif c == curses.KEY_DOWN:
                 pids = list(self.processes.keys())
                 if pids:
@@ -463,9 +539,9 @@ class FFmpegManager:
         curses.curs_set(1)
         curses.start_color()
         curses.use_default_colors()
-        
+
         self.screen.timeout(100)
-        
+
         self.load_processes()
 
         while True:
@@ -486,9 +562,11 @@ class FFmpegManager:
 
         self.save_processes()
 
+
 def main():
     manager = FFmpegManager()
     curses.wrapper(manager.run)
+
 
 if __name__ == "__main__":
     main()
