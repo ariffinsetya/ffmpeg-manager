@@ -38,21 +38,25 @@ def create_ffmpeg_commands_from_preset(input_file: str, output_file: str, preset
     base_name, ext = os.path.splitext(output_file)
 
     for config in preset_config:
-        resolution = config['s'].split('x')[1] + 'p'
-        output = f"{base_name}_{resolution}{ext}"
+        # Create a new command for each preset
+        ext = config['output']['extension']
+        output_suffix = config['output']['suffix']
+
+        # Create output file name
+        output = f"{base_name}_{output_suffix}{ext}"
 
         cmd = ["ffmpeg", "-i", input_file]
 
+        for key in config['ffmpeg']:
         # Add video parameters
-        for key in ['c:v', 'crf', 'b:v', 's']:
-            if key in config:
-                cmd.extend([f"-{key}", str(config[key])])
-
+            if key in ['c:v', 'crf', 'b:v', 's']:
+                cmd.extend([f"-{key}", str(config['ffmpeg'][key])])
         # Add audio parameters
-        for key in ['c:a', 'b:a']:
-            if key in config:
-                cmd.extend([f"-{key}", str(config[key])])
-
+            if key in ['c:a', 'b:a']:
+                cmd.extend([f"-{key}", str(config['ffmpeg'][key])])
+        # Add output parameters
+            if key in ['f']:
+                cmd.extend([f"-{key}", str(config['ffmpeg'][key])])
         cmd.append(output)
         commands.append(cmd)
 
